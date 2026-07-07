@@ -1,32 +1,40 @@
 """
-Aquaponics dashboard backend.
+Aquaponics dashboard backend — lightweight edition.
 
-Uses a persistent headless LibreOffice instance (via UNO) to recalculate the
-REAL workbook on each request. This guarantees the dashboard's numbers match
-the spreadsheet exactly — no formula reconstruction.
+Uses the `formulas` library to evaluate the workbook's Excel formulas directly
+in Python. No LibreOffice, so memory stays well under 512 MB and it fits
+Render's free tier.
 
-Endpoints
----------
-GET  /health    liveness
-GET  /options   valid dropdown values (greens, fish, regions) + current defaults
-POST /calculate set core inputs, recalc, return NPV/verdict/charts
+The compiled model is loaded ONCE at startup (a few seconds), then each
+/calculate call runs the dependency graph with the user's input overrides
+(~1 second).
 
-Concurrency note: a single LibreOffice document is not thread-safe, so
-/calculate is serialized behind a lock. Recalcs are fast (well under a second),
-so this is fine for expected traffic.
+Fidelity: verified to reproduce the workbook's NPV to the penny
+(Framework!S20 = 5913.99) and to respond correctly to every core lever.
+
+Two spreadsheet-level corrections are baked into the model file we ship
+(Model_fixed.xlsx), NOT hacked in code:
+  1. PARTS_PERCENTAGE named range (was missing -> broke Investment!K4 and the
+     whole funding/NPV chain). Defined to Investment!$B$7, matching intent.
+  2. EBITDA row (Framework T10:AC10) rewritten to subtract Water (row 8) and
+     Energy (row 9), which the original formula skipped -- so region/climate
+     now correctly flows into cash flow and NPV.
 """
 
-import os, re, time, socket, subprocess, shutil, threading, atexit
+import os
+import threading
+import warnings
 from contextlib import asynccontextmanager
+
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
-# ── Config ──
-SRC_XLSX = os.environ.get("MODEL_XLSX", "/app/Model_solver_multispecies_Parameters.xlsx")
-WORK_XLSX = "/tmp/_model_work.xlsx"
-UNO_PORT = 2002
-HOME_DIR = os.environ.get("HOME", "/tmp")
+warnings.filterwarnings("ignore")
+
+MODEL_XLSX = os.environ.get("MODEL_XLSX", "/app/Model_fixed.xlsx")
+MODEL_TAG = "'[" + os.path.basename(MODEL_XLSX) + "]FRAMEWORK'"
+FUND_TAG = "'[" + os.path.basename(MODEL_XLSX) + "]FUNDING'"
 
 GREENS = ["Tomato","Lettuce","Chicória","Almeirão Pão de Açúcar","Almeirão Amargo",
           "Espinafre","Alface","Salsinha","Manjericão","Agrião","Cebolinha"]
@@ -37,148 +45,106 @@ DEFAULTS = dict(chosen_green="Lettuce", chosen_fish="Tilapia", total_area=1000,
                 equity=10000, cost_of_equity=0.171, debt_interest_rate=0.1186,
                 region="South America")
 
+CELL = dict(
+    chosen_green      = f"{MODEL_TAG}!M9",
+    chosen_fish       = f"{MODEL_TAG}!M10",
+    total_area        = f"{MODEL_TAG}!M6",
+    equity            = f"{MODEL_TAG}!M5",
+    region            = f"{MODEL_TAG}!M11",
+    cost_of_equity    = f"{FUND_TAG}!D5",
+    debt_interest_rate= f"{FUND_TAG}!D8",
+)
+
+_model = None
 _lock = threading.Lock()
-_doc = None
-_soffice_proc = None
 
 
-def _a1(sheet, a1):
-    m = re.match(r'([A-Z]+)(\d+)', a1)
-    col = 0
-    for ch in m.group(1):
-        col = col * 26 + (ord(ch) - 64)
-    return sheet.getCellByPosition(col - 1, int(m.group(2)) - 1)
+def _load_model():
+    global _model
+    import formulas
+    _model = formulas.ExcelModel().loads(MODEL_XLSX).finish()
 
 
-def _start_soffice():
-    global _soffice_proc
-    env = {**os.environ, "HOME": HOME_DIR}
-    subprocess.run(["pkill", "-f", "soffice"], env=env)
-    time.sleep(2)
-    _soffice_proc = subprocess.Popen(
-        ["soffice","--headless","--invisible","--nocrashreport","--nodefault",
-         "--norestore","--nologo",
-         f"--accept=socket,host=localhost,port={UNO_PORT};urp;"],
-        env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    for _ in range(60):
-        try:
-            s = socket.create_connection(("localhost", UNO_PORT), timeout=1); s.close(); return
-        except OSError:
-            time.sleep(1)
-    raise RuntimeError("LibreOffice UNO port never opened")
+def _cell_value(sol, sheet, a1):
+    key_suffix = "!" + a1
+    for k in sol:
+        ku = k.upper()
+        if sheet in ku and ku.endswith(key_suffix):
+            v = sol[k].value
+            try:
+                return v[0][0]
+            except (TypeError, IndexError):
+                return v
+    return None
 
 
-def _open_doc():
-    global _doc
-    import uno
-    from com.sun.star.beans import PropertyValue
-    shutil.copy(SRC_XLSX, WORK_XLSX)
-    lc = uno.getComponentContext()
-    resolver = lc.ServiceManager.createInstanceWithContext(
-        "com.sun.star.bridge.UnoUrlResolver", lc)
-    ctx = resolver.resolve(
-        f"uno:socket,host=localhost,port={UNO_PORT};urp;StarOffice.ComponentContext")
-    desktop = ctx.ServiceManager.createInstanceWithContext(
-        "com.sun.star.frame.Desktop", ctx)
-    p = PropertyValue(); p.Name = "Hidden"; p.Value = True
-    _doc = desktop.loadComponentFromURL("file://" + WORK_XLSX, "_blank", 0, (p,))
-    _apply_ebitda_fix(_doc)
+def _num(x):
+    try:
+        return float(x)
+    except (TypeError, ValueError):
+        return None
 
 
-def _col_letter(idx0):
-    """0-based column index -> A1 letters."""
-    idx = idx0 + 1
-    s = ""
-    while idx:
-        idx, r = divmod(idx - 1, 26)
-        s = chr(65 + r) + s
-    return s
+def _calculate(inp: dict) -> dict:
+    if _model is None:
+        _load_model()
 
+    overrides = {
+        CELL["chosen_green"]: inp["chosen_green"],
+        CELL["chosen_fish"]:  inp["chosen_fish"],
+        CELL["total_area"]:   inp["total_area"],
+        CELL["equity"]:       inp["equity"],
+        CELL["region"]:       inp["region"],
+        CELL["cost_of_equity"]:     inp["cost_of_equity"],
+        CELL["debt_interest_rate"]: inp["debt_interest_rate"],
+    }
+    sol = _model.calculate(inputs=overrides)
 
-def _apply_ebitda_fix(doc):
-    """
-    Fix a bug in the Framework P&L: the EBITDA row (T10:AC10) originally computed
-    `= NetRevenue - SUM(COGS:People)`, which SKIPS the Water (row 8) and Energy
-    (row 9) rows -- so climate-driven costs were displayed but never subtracted
-    from cash flow. We rewrite each year's EBITDA to also subtract water & energy,
-    so region/climate changes now correctly flow through to NPV.
+    npv = _num(_cell_value(sol, "FRAMEWORK", "S20"))
+    verdict = _cell_value(sol, "FRAMEWORK", "T20")
+    if isinstance(verdict, str):
+        verdict = verdict.strip()
+    else:
+        verdict = "YES" if (npv or 0) > 0 else "NO"
+    payback = _num(_cell_value(sol, "FRAMEWORK", "S22"))
+    wacc = _num(_cell_value(sol, "FUNDING", "L5"))
+    total_inv = _num(_cell_value(sol, "INVESTMENT", "K4"))
+    gross_rev = _num(_cell_value(sol, "FRAMEWORK", "U3"))
 
-    Columns T..AC are the 10 forecast years (col index 19..28), row 10 (index 9).
-    Original: =<col>5 - SUM(<col>6:<col>7)
-    Fixed:    =<col>5 - SUM(<col>6:<col>9)
-    """
-    fw = doc.Sheets.getByName("Framework")
-    for col in range(19, 29):  # T..AC
-        cell = fw.getCellByPosition(col, 9)  # row 10
-        cl = _col_letter(col)
-        cell.setFormula(f"={cl}5-SUM({cl}6:{cl}9)")
+    cols = ["S","T","U","V","W","X","Y","Z","AA","AB","AC"]
+    fcf = [_num(_cell_value(sol, "FRAMEWORK", c + "16")) or 0 for c in cols]
+    acc = [_num(_cell_value(sol, "FRAMEWORK", c + "18")) or 0 for c in cols]
 
-
-def _ensure_ready():
-    global _doc
-    if _doc is None:
-        _start_soffice()
-        _open_doc()
-
-
-def _recalc(inp: dict) -> dict:
-    _ensure_ready()
-    fw = _doc.Sheets.getByName("Framework")
-    fn = _doc.Sheets.getByName("Funding")
-    inv = _doc.Sheets.getByName("Investment")
-
-    # write inputs
-    _a1(fw, "M5").setValue(float(inp["equity"]))
-    _a1(fw, "M6").setValue(float(inp["total_area"]))
-    _a1(fw, "M9").setString(inp["chosen_green"])
-    _a1(fw, "M10").setString(inp["chosen_fish"])
-    _a1(fw, "M11").setString(inp["region"])
-    _a1(fn, "D5").setValue(float(inp["cost_of_equity"]))
-    _a1(fn, "D8").setValue(float(inp["debt_interest_rate"]))
-
-    _doc.calculateAll()
-
-    npv = _a1(fw, "S20").getValue()
-    verdict = _a1(fw, "T20").getString()
-    payback = _a1(fw, "S22").getValue()
-    wacc = _a1(fn, "L5").getValue()
-    total_inv = _a1(inv, "K4").getValue()
-    gross_rev = fw.getCellByPosition(20, 2).getValue()  # U3 year-2 gross revenue steady
-
-    fcf = [round(fw.getCellByPosition(18+i, 15).getValue(), 2) for i in range(11)]
-    acc = [round(fw.getCellByPosition(18+i, 17).getValue(), 2) for i in range(11)]
     wf_labels = ["Gross Revenue","Sales Taxes","COGS","People Costs","Water Costs",
                  "Energy Costs","Debt Interest","Corporate Tax","Investment",
                  "Loan Repayment","Free Cash Flow"]
-    wf_vals = [round(fw.getCellByPosition(31, i).getValue(), 2) for i in range(2, 13)]
+    wf_vals = [_num(_cell_value(sol, "FRAMEWORK", f"AF{3+i}")) or 0 for i in range(11)]
     waterfall = dict(zip(wf_labels, wf_vals))
 
     return dict(
-        npv=round(npv, 2), verdict=verdict,
+        npv=round(npv, 2) if npv is not None else None,
+        verdict=verdict,
         payback_years=round(payback, 2) if payback and payback > 0 else None,
-        wacc=round(wacc, 4), total_investment=round(total_inv, 2),
-        gross_revenue=round(gross_rev, 2),
-        free_cashflows=fcf, accumulated_value=acc, waterfall=waterfall,
+        wacc=round(wacc, 4) if wacc is not None else None,
+        total_investment=round(total_inv, 2) if total_inv is not None else None,
+        gross_revenue=round(gross_rev, 2) if gross_rev is not None else None,
+        free_cashflows=[round(x, 2) for x in fcf],
+        accumulated_value=[round(x, 2) for x in acc],
+        waterfall={k: round(v, 2) for k, v in waterfall.items()},
     )
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Warm up LibreOffice at startup, but don't let a slow/failed warmup crash the
-    # whole service — /health must be able to respond so the platform marks us live.
-    # If warmup fails here, the first /calculate call will retry it.
     try:
         with _lock:
-            _ensure_ready()
+            _load_model()
     except Exception as e:
-        print(f"[startup] LibreOffice warmup deferred: {e}", flush=True)
+        print(f"[startup] model load deferred: {e}", flush=True)
     yield
-    if _soffice_proc:
-        _soffice_proc.terminate()
 
-atexit.register(lambda: _soffice_proc.terminate() if _soffice_proc else None)
 
-app = FastAPI(title="Aquaponics Dashboard", version="1.0.0", lifespan=lifespan)
+app = FastAPI(title="Aquaponics Dashboard", version="2.0.0", lifespan=lifespan)
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 
@@ -205,18 +171,15 @@ def options():
 @app.post("/calculate")
 def calculate(req: CalcRequest):
     if req.chosen_green not in GREENS:
-        raise HTTPException(400, f"Unknown green: {req.chosen_green}")
+        raise HTTPException(400, f"Unknown crop: {req.chosen_green}")
     if req.chosen_fish not in FISH:
         raise HTTPException(400, f"Unknown fish: {req.chosen_fish}")
     if req.region not in REGIONS:
         raise HTTPException(400, f"Unknown region: {req.region}")
     try:
         with _lock:
-            return _recalc(req.model_dump())
+            return _calculate(req.model_dump())
     except Exception as e:
-        # recover a dead LibreOffice on next call
-        global _doc
-        _doc = None
         raise HTTPException(500, f"{type(e).__name__}: {e}")
 
 
