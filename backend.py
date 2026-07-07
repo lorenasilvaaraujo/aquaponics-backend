@@ -164,8 +164,14 @@ def _recalc(inp: dict) -> dict:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    with _lock:
-        _ensure_ready()
+    # Warm up LibreOffice at startup, but don't let a slow/failed warmup crash the
+    # whole service — /health must be able to respond so the platform marks us live.
+    # If warmup fails here, the first /calculate call will retry it.
+    try:
+        with _lock:
+            _ensure_ready()
+    except Exception as e:
+        print(f"[startup] LibreOffice warmup deferred: {e}", flush=True)
     yield
     if _soffice_proc:
         _soffice_proc.terminate()
