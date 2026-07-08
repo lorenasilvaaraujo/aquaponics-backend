@@ -25,7 +25,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
-from typing import Optional, List
+from typing import Optional, List, Dict
 
 warnings.filterwarnings("ignore")
 
@@ -56,6 +56,31 @@ REGION_DEFAULTS = {
     "Europe":        dict(energy=0.240, water=3.5),
     "Oceania":       dict(energy=0.266, water=4.0),
 }
+
+# ── Equipment with a productivity factor (Investment sheet) ──────────────────
+# Toggle writes 1/0 into Investment!C{row}. Column G is that item's productivity
+# factor; the system factor is MAX(activated) = Investment!H7, which multiplies
+# crop revenue. Items with factor 1.0 are cost/energy-only (no yield boost).
+EQUIPMENT = [
+    dict(row=25, name="Aeration Pump",              group="Fish tank",       factor=1.05, default=0),
+    dict(row=35, name="Ventilators",                group="Hydroponic area", factor=1.00, default=1),
+    dict(row=36, name="De-humidifier",              group="Hydroponic area", factor=1.00, default=1),
+    dict(row=37, name="Greenhouse",                 group="Hydroponic area", factor=1.05, default=0),
+    dict(row=38, name="Lighting",                   group="Hydroponic area", factor=0.98, default=0),
+    dict(row=43, name="pH sensor",                  group="Hydroponic unit", factor=1.02, default=1),
+    dict(row=44, name="Nutrient dosing unit",       group="Hydroponic unit", factor=1.00, default=0),
+    dict(row=45, name="Hanging/moving Gutter",      group="Hydroponic unit", factor=1.00, default=0),
+    dict(row=46, name="UV-sterilization",           group="Hydroponic unit", factor=1.00, default=0),
+    dict(row=47, name="Pollination vibrator",       group="Hydroponic unit", factor=1.00, default=0),
+    dict(row=51, name="Biologic Surface Area",      group="Synergies",       factor=1.00, default=1),
+    dict(row=52, name="Periphyton Surface Area",    group="Synergies",       factor=1.01, default=1),
+    dict(row=53, name="Biofloc",                    group="Synergies",       factor=1.02, default=0),
+    dict(row=54, name="Aerobic mineralization",     group="Synergies",       factor=1.11, default=1),
+    dict(row=55, name="UASB Bioreactor",            group="Synergies",       factor=1.00, default=0),
+    dict(row=56, name="EGSB Bioreactor",            group="Synergies",       factor=1.00, default=0),
+    dict(row=57, name="Gravity Separation (RFS)",   group="Synergies",       factor=1.00, default=0),
+]
+EQUIP_ROWS = {e["row"] for e in EQUIPMENT}
 
 # Species default prices/costs (for pre-filling the UI on selection).
 GREEN_PRICE_DEFAULT = {"Tomato":3,"Lettuce":5,"Chicória":10,"Almeirão Pão de Açúcar":10,
@@ -180,6 +205,18 @@ def _calculate(inp: dict) -> dict:
             ov[f"{LOC}!E{row}"] = climate["precip"][i]
             ov[f"{LOC}!F{row}"] = climate["et"][i]
 
+    # --- Equipment toggles: write 1/0 into Investment!C{row} ---
+    equip = inp.get("equipment") or {}
+    if equip:
+        INV = _tag("Investment")
+        for row_str, on in equip.items():
+            try:
+                row = int(row_str)
+            except (TypeError, ValueError):
+                continue
+            if row in EQUIP_ROWS:
+                ov[f"{INV}!C{row}"] = 1 if on else 0
+
     sol = _model.calculate(inputs=ov)
 
     npv = _num(_cv(sol, "FRAMEWORK", "S20"))
@@ -189,6 +226,7 @@ def _calculate(inp: dict) -> dict:
     wacc = _num(_cv(sol, "FUNDING", "L5"))
     total_inv = _num(_cv(sol, "INVESTMENT", "K4"))
     gross_rev = _num(_cv(sol, "FRAMEWORK", "U3"))
+    prod_factor = _num(_cv(sol, "INVESTMENT", "H7"))
 
     cols = ["S","T","U","V","W","X","Y","Z","AA","AB","AC"]
     fcf = [_num(_cv(sol, "FRAMEWORK", c + "16")) or 0 for c in cols]
@@ -207,6 +245,7 @@ def _calculate(inp: dict) -> dict:
         wacc=round(wacc, 4) if wacc is not None else None,
         total_investment=round(total_inv, 2) if total_inv is not None else None,
         gross_revenue=round(gross_rev, 2) if gross_rev is not None else None,
+        productivity_factor=round(prod_factor, 4) if prod_factor is not None else None,
         free_cashflows=[round(x, 2) for x in fcf],
         accumulated_value=[round(x, 2) for x in acc],
         waterfall={k: round(v, 2) for k, v in waterfall.items()},
@@ -252,6 +291,8 @@ class CalcRequest(BaseModel):
     fish_feed: Optional[float] = None
     energy_price: Optional[float] = None
     water_price: Optional[float] = None
+    # Equipment toggles: {"35": 1, "37": 0, ...} keyed by Investment sheet row
+    equipment: Optional[Dict[str, int]] = None
     # Step 1
     climate: Optional[Climate] = None
 
@@ -268,6 +309,7 @@ def options():
         green_price_default=GREEN_PRICE_DEFAULT, fish_price_default=FISH_PRICE_DEFAULT,
         green_cost_default=GREEN_COST_DEFAULT, fish_cost_default=FISH_COST_DEFAULT,
         region_defaults=REGION_DEFAULTS, country_region=COUNTRY_REGION,
+        equipment=EQUIPMENT,
         defaults=dict(chosen_green="Lettuce", chosen_fish="Tilapia", total_area=1000,
                       equity=10000, cost_of_equity=0.171, debt_interest_rate=0.1186,
                       region="South America"),
