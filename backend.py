@@ -125,6 +125,80 @@ COUNTRY_REGION = {
     "SB":"Oceania","VU":"Oceania","WS":"Oceania","TO":"Oceania",
 }
 
+# ── "Advanced" red-font user inputs, grouped for the modal ───────────────────
+# Each entry: key -> (sheet, cell-template, label, group, step, unit)
+# {G} = row of the chosen crop on System_Parameters, {F} = row of chosen fish.
+SP_GREEN_ROW = {g: 19 + i for i, g in enumerate(GREENS)}
+SP_FISH_ROW = {"Tilapia": 33, "Trout": 34}
+
+ADVANCED = [
+    # System sizing
+    dict(key="pfrm",            sheet="System_Parameters", cell="E4",  label="Plant : fish mass ratio", group="System sizing", step=0.1,   unit=""),
+    dict(key="tank_volume",     sheet="System_Parameters", cell="E5",  label="Avg tank volume",         group="System sizing", step=1,     unit="m³"),
+    dict(key="tank_height",     sheet="System_Parameters", cell="E6",  label="Tank height",             group="System sizing", step=0.1,   unit="m"),
+    dict(key="max_hydro_unit",  sheet="System_Parameters", cell="E7",  label="Max hydroponic unit",     group="System sizing", step=1,     unit="m²"),
+    dict(key="admin_pct",       sheet="System_Parameters", cell="E8",  label="Admin / service area",    group="System sizing", step=0.01,  unit="fraction"),
+    # Crop biology (row depends on chosen crop)
+    dict(key="crop_lifecycle",  sheet="System_Parameters", cell="C{G}", label="Lifecycle",              group="Crop biology",  step=1,     unit="days"),
+    dict(key="crop_density",    sheet="System_Parameters", cell="D{G}", label="Plants per m²",          group="Crop biology",  step=1,     unit="plants/m²"),
+    dict(key="crop_kg",         sheet="System_Parameters", cell="E{G}", label="Yield per plant",        group="Crop biology",  step=0.01,  unit="kg"),
+    dict(key="crop_tmin",       sheet="System_Parameters", cell="F{G}", label="Min temperature",        group="Crop biology",  step=1,     unit="°C"),
+    dict(key="crop_tmax",       sheet="System_Parameters", cell="G{G}", label="Max temperature",        group="Crop biology",  step=1,     unit="°C"),
+    dict(key="crop_tideal",     sheet="System_Parameters", cell="H{G}", label="Ideal temperature",      group="Crop biology",  step=1,     unit="°C"),
+    # Fish biology
+    dict(key="fish_lifecycle",  sheet="System_Parameters", cell="C{F}", label="Lifecycle",              group="Fish biology",  step=1,     unit="days"),
+    dict(key="fish_density",    sheet="System_Parameters", cell="D{F}", label="Fish per m³",            group="Fish biology",  step=1,     unit="fish/m³"),
+    dict(key="fish_kg",         sheet="System_Parameters", cell="E{F}", label="Weight at harvest",      group="Fish biology",  step=0.05,  unit="kg"),
+    dict(key="fish_tmin",       sheet="System_Parameters", cell="F{F}", label="Min temperature",        group="Fish biology",  step=1,     unit="°C"),
+    dict(key="fish_tmax",       sheet="System_Parameters", cell="G{F}", label="Max temperature",        group="Fish biology",  step=1,     unit="°C"),
+    dict(key="fish_tideal",     sheet="System_Parameters", cell="H{F}", label="Ideal temperature",      group="Fish biology",  step=1,     unit="°C"),
+    # Revenue assumptions
+    dict(key="crop_loss",       sheet="Revenues", cell="B8",  label="Crop loss rate",        group="Revenue",  step=0.01, unit="fraction"),
+    dict(key="fish_loss",       sheet="Revenues", cell="B9",  label="Fish loss rate",        group="Revenue",  step=0.01, unit="fraction"),
+    dict(key="first_year_ramp", sheet="Revenues", cell="B10", label="Year-1 ramp",           group="Revenue",  step=0.05, unit="fraction"),
+    dict(key="sales_tax",       sheet="Revenues", cell="B11", label="Sales tax",             group="Revenue",  step=0.005,unit="fraction"),
+    dict(key="corp_tax",        sheet="Revenues", cell="B12", label="Corporate tax",         group="Revenue",  step=0.01, unit="fraction"),
+    dict(key="services_a",      sheet="Revenues", cell="B13", label="Services revenue A",    group="Revenue",  step=100,  unit="$/yr"),
+    dict(key="services_b",      sheet="Revenues", cell="B14", label="Services revenue B",    group="Revenue",  step=100,  unit="$/yr"),
+    # Investment & financing
+    dict(key="maintenance_pct", sheet="Investment", cell="B6", label="Maintenance",          group="Investment & financing", step=0.005, unit="of capex"),
+    dict(key="spare_parts_pct", sheet="Investment", cell="B7", label="Spare parts",          group="Investment & financing", step=0.005, unit="of capex"),
+    dict(key="grace_years",     sheet="Funding",    cell="E8", label="Debt grace period",    group="Investment & financing", step=1,     unit="years"),
+    dict(key="debt_years",      sheet="Funding",    cell="F8", label="Debt term",            group="Investment & financing", step=1,     unit="years"),
+    # Operating costs
+    dict(key="crop_worker",     sheet="Costs", cell="B21", label="Crop worker salary",       group="Operating costs", step=50, unit="$/month"),
+    dict(key="aqua_worker",     sheet="Costs", cell="B22", label="Aquaculture worker salary",group="Operating costs", step=50, unit="$/month"),
+    dict(key="biologic_surface",sheet="Costs", cell="B26", label="Biologic surface area",    group="Operating costs", step=5,  unit="$/tank"),
+    dict(key="nutrients",       sheet="Costs", cell="B32", label="Nutrients",                group="Operating costs", step=0.01,unit="$/plant"),
+    dict(key="controls",        sheet="Costs", cell="B34", label="Controls",                 group="Operating costs", step=1,  unit="$/m²"),
+]
+
+# Defaults so the modal can pre-fill without a round trip.
+GREEN_BIO = {
+    "Tomato":                 dict(crop_lifecycle=365, crop_density=3.9, crop_kg=10,      crop_tmin=13, crop_tmax=32, crop_tideal=23),
+    "Lettuce":                dict(crop_lifecycle=35,  crop_density=25,  crop_kg=0.2,     crop_tmin=7,  crop_tmax=24, crop_tideal=18),
+    "Chicória":               dict(crop_lifecycle=28,  crop_density=16,  crop_kg=0.13232, crop_tmin=7,  crop_tmax=24, crop_tideal=18),
+    "Almeirão Pão de Açúcar": dict(crop_lifecycle=28,  crop_density=16,  crop_kg=0.09816, crop_tmin=7,  crop_tmax=24, crop_tideal=18),
+    "Almeirão Amargo":        dict(crop_lifecycle=28,  crop_density=16,  crop_kg=0.11576, crop_tmin=7,  crop_tmax=24, crop_tideal=18),
+    "Espinafre":              dict(crop_lifecycle=28,  crop_density=16,  crop_kg=0.07872, crop_tmin=7,  crop_tmax=24, crop_tideal=18),
+    "Alface":                 dict(crop_lifecycle=28,  crop_density=16,  crop_kg=0.07872, crop_tmin=7,  crop_tmax=24, crop_tideal=18),
+    "Salsinha":               dict(crop_lifecycle=28,  crop_density=16,  crop_kg=0.03587, crop_tmin=7,  crop_tmax=24, crop_tideal=18),
+    "Manjericão":             dict(crop_lifecycle=28,  crop_density=16,  crop_kg=0.04206, crop_tmin=7,  crop_tmax=24, crop_tideal=18),
+    "Agrião":                 dict(crop_lifecycle=28,  crop_density=16,  crop_kg=0.07369, crop_tmin=7,  crop_tmax=24, crop_tideal=18),
+    "Cebolinha":              dict(crop_lifecycle=28,  crop_density=16,  crop_kg=0.02525, crop_tmin=7,  crop_tmax=24, crop_tideal=18),
+}
+FISH_BIO = {
+    "Tilapia": dict(fish_lifecycle=180, fish_density=100, fish_kg=0.6, fish_tmin=11, fish_tmax=35, fish_tideal=29),
+    "Trout":   dict(fish_lifecycle=365, fish_density=22,  fish_kg=0.5, fish_tmin=0,  fish_tmax=21, fish_tideal=14),
+}
+STATIC_ADV_DEFAULTS = dict(
+    pfrm=3.1, tank_volume=10, tank_height=1.2, max_hydro_unit=5, admin_pct=0.15,
+    crop_loss=0.05, fish_loss=0.05, first_year_ramp=0.6, sales_tax=0.065, corp_tax=0.15,
+    services_a=0, services_b=0, maintenance_pct=0.01, spare_parts_pct=0.025,
+    grace_years=0, debt_years=10, crop_worker=1500, aqua_worker=3000,
+    biologic_surface=50, nutrients=0.15, controls=10,
+)
+
 _model = None
 _lock = threading.Lock()
 
@@ -217,6 +291,19 @@ def _calculate(inp: dict) -> dict:
             if row in EQUIP_ROWS:
                 ov[f"{INV}!C{row}"] = 1 if on else 0
 
+    # --- Advanced (red-font) overrides ---
+    advanced = inp.get("advanced") or {}
+    if advanced:
+        grow = SP_GREEN_ROW.get(green)
+        frow = SP_FISH_ROW.get(fish)
+        spec = {a["key"]: a for a in ADVANCED}
+        for key, val in advanced.items():
+            a = spec.get(key)
+            if a is None or val is None:
+                continue
+            cell = a["cell"].replace("{G}", str(grow)).replace("{F}", str(frow))
+            ov[f"{_tag(a['sheet'])}!{cell}"] = val
+
     sol = _model.calculate(inputs=ov)
 
     npv = _num(_cv(sol, "FRAMEWORK", "S20"))
@@ -227,6 +314,9 @@ def _calculate(inp: dict) -> dict:
     total_inv = _num(_cv(sol, "INVESTMENT", "K4"))
     gross_rev = _num(_cv(sol, "FRAMEWORK", "U3"))
     prod_factor = _num(_cv(sol, "INVESTMENT", "H7"))
+    rev_greens   = _num(_cv(sol, "REVENUES", "G4")) or 0.0
+    rev_fish     = _num(_cv(sol, "REVENUES", "G6")) or 0.0
+    rev_services = _num(_cv(sol, "REVENUES", "G7")) or 0.0
 
     cols = ["S","T","U","V","W","X","Y","Z","AA","AB","AC"]
     fcf = [_num(_cv(sol, "FRAMEWORK", c + "16")) or 0 for c in cols]
@@ -246,6 +336,8 @@ def _calculate(inp: dict) -> dict:
         total_investment=round(total_inv, 2) if total_inv is not None else None,
         gross_revenue=round(gross_rev, 2) if gross_rev is not None else None,
         productivity_factor=round(prod_factor, 4) if prod_factor is not None else None,
+        revenue_split=dict(greens=round(rev_greens, 2), fish=round(rev_fish, 2),
+                           services=round(rev_services, 2)),
         free_cashflows=[round(x, 2) for x in fcf],
         accumulated_value=[round(x, 2) for x in acc],
         waterfall={k: round(v, 2) for k, v in waterfall.items()},
@@ -293,6 +385,8 @@ class CalcRequest(BaseModel):
     water_price: Optional[float] = None
     # Equipment toggles: {"35": 1, "37": 0, ...} keyed by Investment sheet row
     equipment: Optional[Dict[str, int]] = None
+    # Advanced red-font inputs: {"crop_density": 20, "sales_tax": 0.07, ...}
+    advanced: Optional[Dict[str, float]] = None
     # Step 1
     climate: Optional[Climate] = None
 
@@ -310,6 +404,8 @@ def options():
         green_cost_default=GREEN_COST_DEFAULT, fish_cost_default=FISH_COST_DEFAULT,
         region_defaults=REGION_DEFAULTS, country_region=COUNTRY_REGION,
         equipment=EQUIPMENT,
+        advanced=ADVANCED, advanced_defaults=STATIC_ADV_DEFAULTS,
+        green_bio=GREEN_BIO, fish_bio=FISH_BIO,
         defaults=dict(chosen_green="Lettuce", chosen_fish="Tilapia", total_area=1000,
                       equity=10000, cost_of_equity=0.171, debt_interest_rate=0.1186,
                       region="South America"),
